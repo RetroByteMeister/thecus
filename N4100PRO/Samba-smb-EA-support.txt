@@ -1,0 +1,17 @@
+Thecus samba sqlite EA add setup for extended attribute storage on the Thecus NAS, for use with OS/2 (eCS).
+
+Convo with Lewis Rosenthal, 12Oct2013:
+
+> Remember that (IIRC), even though you set the password
+> for "admin" in the web interface, the username for the ssh login is
+> still "root" (using that same password)
+
+Poke EA support in samba into the sql database that is used instead of smb.conf:
+> N2200EVO:~# sqlite /raid0/sys/smb.db "insert into smb_share (k,v,m) values ('ea support','yes','0')"
+>
+> Restart samba:
+> N2200EVO:~# /img/bin/rc/rc.samba restart
+
+sqlite /raid0/sys/smb.db "insert into smb_share (k,v,m) values ('ea support','yes','0')"
+
+/img/bin/rc/rc.samba restart

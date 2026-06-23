@@ -1,0 +1,120 @@
+[size=150][b]Notes on Thecus N4100Pro NAS setup: embedded samba server & OS/2 & WinXP Pro[/b][/size]
+
+Thecus N4100Pro with (2) HGST 6Gb drives in RAID1 (mirrored)
+
+Putty for command line
+WinSCP for GUI file manager
+
+Samba (smbd) needs to have its smb.conf modified to add options to allow OS/2 to log in, use shares, and use EAs.
+smb.conf is stored in a sqlite database and is regenerated at boot time.
+One can either modify the database, or overwrite smb.conf after boot, and restart samba. I did the latter; it was much easier to test changes and roll back what didn't work.
+
+On the N4100Pro, I installed the 3rd-party module META, which allows to run a script at startup. I believe that on the N4100Pro, that may be the only way to autorun a script at startup.  The META module that I installed was N5200_META_2.00.00.zip; although there are references to later versions, this was the only one that I could actually download.
+
+When logging in via Putty or SSH, remember to log in as root -- not a user -- and to use the root's password, which is the same one you use to log in at the web interface. Default is "admin".
+
+The samba version that is installed with Thecus firmware v5.03.02 is 3.5.16
+[code]	root@127.0.0.1:/opt/samba/sbin# ./smbd --version
+    Version 3.5.16
+[/code]
+	
+Because the N4100Pro runs BusyBox linux, the samba install is stripped-down; there is no pdbedit or testparm, so you have to approach any problems you encounter tangentially.
+
+For configuring OS/2 to use the N4100Pro's samba server, the hurdles I faced included:
+[list=1][*]Extended Attributes (EAs): The N4100Pro uses XFS, which like HPFS (and HPFS386) can use EAs <=64k (http://xfs.org/docs/xfsdocs-xml-dev/XFS_User_Guide/tmp/en-US/html/xfs-xattr.html), but the EA feature is not enabled.   [*]Protocols: OS/2 needs to use NetBIOS over TCP/IP (port 139) protocol, and must log in to smbd using LanManager v2.1 protocol, plaintext (non-encrypted).   [/list]
+
+The first is relatively easy: the EA feature of samba is turned OFF by default.  This line needs to be added to the [global] section of smb.conf to enable it:
+[code]	ea support = Yes [/code]
+	
+The second, though . . . 
+	
+Samba negotiates the protocol during the first exchange of data.  Here's a snippet of the samba log at the beginning of protocol negotiation with an OS/2 computer using the IBM Peer networking via NetBIOS over TCP/IP:
+
+[code]	Requested protocol [PC NETWORK PROGRAM 1.0]
+	Requested protocol [XENIX CORE]
+	Requested protocol [LANMAN1.0]
+	Requested protocol [LM1.2X002]
+	Requested protocol [LANMAN2.1]
+	Selected protocol LANMAN2.1
+[/code]
+	
+Samba is presenting from lowest to highest security (oldest to newest) the list of protocols it can accept, and both samba & OS/2 settle on LanManager v2.1 .
+
+In order to get samba to even present these (old) protocols, these lines need to be added to the [global] section of smb.conf (as described here: https://trac.netlabs.org/samba/wiki/FAQ#ConnectingtoSamba3.3.xusingIBM-LAN-Requester ):
+
+[code]	lanman auth = true
+	client lanman auth = true
+	client plaintext auth = true
+[/code]
+	
+That will let the process of OS/2 logging to samba begin.  However, there's another problem that took me some time to understand: [i]the user/password on the samba side must be created [b]after[/b] those lines are added to smb.conf and smbd has been restarted[/i].  Why?  Samba stores the password in another database, apparently in a way that old LanManager passwords occupy one field, and newer, encrypted passwords in another field.  Until those three option lines above are read by smbd and are in force, any user/password you add will [b]not[/b] have a LanManager password stored, and all attempts to log in will fail.
+
+If "log level = 3" is set, you can see this failure, with lines [url=https://forums.opensuse.org/showthread.php/394589-The-client-98-does-not-work-(samba)?p=1868409#post1868409]similar to this[/url]:
+
+[code]	ntlm_password_check: NO LanMan password set for user arhiv (and no NT password supplied)
+	  [2008/09/08 07:06:31, 3] libsmb/ntlm_check.c:ntlm_password_check(457)
+	ntlm_password_check: LM password, NT MD4 password in LM field and LMv2 failed for user arhiv
+	  [2008/09/08 07:06:31, 2] auth/auth.c:check_ntlm_password(318)
+	check_ntlm_password: Authentication for user [ARHIV] -> [ARHIV] FAILED with error NT_STATUS_WRONG_PASSWORD
+[/code]
+	
+That was hard to figure out.
+
+For my situation, I'm using WinXP Pro (which networks differently than WinXP Home) with this NAS, as well as OS/2, and WinXP Pro really doesn't like the options needed for LanMan 2.1 to work. The fix for this is to configure samba to use a default that Win likes, and another collection of config values (including those old LanMan 2.1 options) only when the OS/2 computer is logging in.  The way to do that is to use samba's variable substitution feature.
+
+In the [global] section of smb.conf, at the end of the section, I added:
+
+[code]	# Include special config for JONI2 (OS/2, eCS) LanMan
+	include = /raid0/sys/smb.conf.%m
+[/code]
+
+This instructs samba to look at the NetBIOS name of every client that attempts to log in, and then look for a file specified.  "%m" is the variable substitution for the NetBIOS name.  In my case, the OS/2 computer has a NetBIOS name of "JONI2", and when it attempts a login, samba looks for a file named, "smb.conf.joni2" (lower case: samba lowercases all NetBIOS names, and case [i]does[/i] matter) and if that file is found, it will load it and process the options within.  
+
+[b]smb.conf.joni2[/b] :
+	[code]# 16Jul2016 ALS: Added next lines per FAQ https://trac.netlabs.org/samba/wiki/FAQ
+	lanman auth = true
+	client lanman auth = true
+	client plaintext auth = true
+
+	wide links = Yes
+	dos charset = ASCII
+	unix charset = UTF-8
+	display charset = UTF-8
+
+	# 29Jul2016 ALS: Added below lines.
+	encrypt passwords = no
+	lm announce = yes  # in case samba doesn't realize it needs to broadcast itself.
+	lm interval = 60 # seconds
+
+	# Log level for THIS computer's session (JONI2), & log file location.
+	log file = /opt/samba/var/log/samba.%m.log
+	log level = 0
+	max log size = 100
+	debug timestamp = no
+[/code]
+
+Two problems that took longer than usual to understand: 
+[list=1][*]When using smbpasswd to add a user, the change does not appear to be reflected back to the underlying linux system.  Deleting a user via smbpasswd does not delete the user seen at the web admin interface.   [*]When using the [b]include[/b] directive in smb.conf, smbpasswd will NOT be using those included options when adding/changing a user's password; therefore, it will NOT write the LanMan password to the database.  Took me forever to figure that out. Solution: temporarily add those three LanMan lines to the main smb.conf file in the [global] section, restart smbd, use smbpasswd to edit the passwordk (or add the user fresh) that the OS/2 box logs in as, then delete the lines from smb.conf and again restart smbd.[/list]
+
+[b][size=150]Miscellaneous[/size][/b]
+
+Don't forget turn down the log level to 0 after debugging; log level = 3 will chew up a lot of CPU while writing to log files (though only 200k of disk space as configured above).
+
+When using Notepad++ to save text files, be certain to specify [b]Edit->EOL Conversion->Unix/OSX format[/b].  If not, the files will generally not process correctly.
+
+smb.conf.joni2 -> /raid/sys/
+[url=http://asavage.dyndns.org/ftp/Drivers/Thecus/N4100Pro/Samba_Modify-smb-conf-at-startup.txt]Samba_Modify-smb-conf-at-startup.txt[/url] -> /raid/data/module/META/system/etc/startup
+
+Logs : /opt/samba/var/logs/
+smbd : /opt/samba/sbin
+smbpasswd : /opt/samba/bin
+
+Useful command lines for my system:
+/raid/data/module/META/system/etc/startup/Samba_Modify-smb-conf-at-startup.txt
+That file must be set to executable:
+[code]	chmod +x /raid/data/module/META/system/etc/startup/Samba_Modify-smb-conf-at-startup.txt[/code]
+
+/opt/samba/bin/smbpasswd -a <username> (make certain that the three LanMan opt lines are active before running this!)
+find / -name <filename>
+/img/bin/rc/rc.samba restart 1 (handy to restart with new smb.conf after changing something)
+ 
